@@ -3462,6 +3462,85 @@
                     
                 </div>
                 
+                <h4>Adaptive min. flow</h4>
+                <div class="flexline">
+                    <div class="param">
+                        <h5>enable</h5>
+                        <div class="infobox">
+                            Searches the highest flow setpoint the boiler can hold at its minimum modulation, to avoid on/off cycling at low load.<br>
+                            <ul>
+                                <li>Active only while the calculated flow is below the lower limit, the burner runs for central heating and no hot water is drawn.</li>
+                                <li>After each <span class="h5-hint">wait</span> period the average modulation is compared with the previous period: if it stayed at the previous level the limit is raised by <span class="h5-hint">step</span>, if it rose the limit goes one step back and is held.</li>
+                                <li>If the burner switches off at the lower limit while heating is still requested, the limit is raised immediately.</li>
+                                <li>The limit stays between the <span class="h5-hint">min. flow temperature</span> and <span class="h5-hint">min. flow temperature</span> + <span class="h5-hint">max. rise</span>.</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <label class="switch">
+                                <input type="checkbox" hideele="adaptMinParams" field="heating.$.adaptMin.enabled" />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="adaptMinParams" class="flexline" hidden>
+                    <div class="param range" field="heating.$.adaptMin.step">
+                        <h5>Step</h5>
+                        <div class="infobox">Change of the lower limit per step.</div>
+                        <div class="flexline">
+                            <div class="valunit">
+                                <span class="value"></span>
+                                <span class="unit">K</span>
+                            </div>
+                            <input type="range" min="0.5" max="2.0" step="0.5">
+                        </div>
+                    </div>
+                    <div class="param range" field="heating.$.adaptMin.wait">
+                        <h5>Wait</h5>
+                        <div class="infobox">Time to let the modulation settle after a step (one observation window).</div>
+                        <div class="flexline">
+                            <div class="valunit">
+                                <span class="value"></span>
+                                <span class="unit">min</span>
+                            </div>
+                            <input type="range" min="2" max="15" step="1">
+                        </div>
+                    </div>
+                    <div class="param range" field="heating.$.adaptMin.modTol">
+                        <h5>Modulation tolerance</h5>
+                        <div class="infobox">Modulation counts as &quot;same level&quot; while it is at most this much above the previous window.</div>
+                        <div class="flexline">
+                            <div class="valunit">
+                                <span class="value"></span>
+                                <span class="unit">%</span>
+                            </div>
+                            <input type="range" min="0" max="10" step="1">
+                        </div>
+                    </div>
+                    <div class="param range" field="heating.$.adaptMin.maxRise">
+                        <h5>Max. rise</h5>
+                        <div class="infobox">Max. raise of the lower limit above the min. flow temperature.</div>
+                        <div class="flexline">
+                            <div class="valunit">
+                                <span class="value"></span>
+                                <span class="unit">K</span>
+                            </div>
+                            <input type="range" min="2" max="15" step="1">
+                        </div>
+                    </div>
+                    <div class="param range" field="heating.$.adaptMin.reprobe">
+                        <h5>Re-probe</h5>
+                        <div class="infobox">Time in hold before probing upwards again (0 = never).</div>
+                        <div class="flexline">
+                            <div class="valunit">
+                                <span class="value"></span>
+                                <span class="unit">min</span>
+                            </div>
+                            <input type="range" min="0" max="120" step="5">
+                        </div>
+                    </div>
+                    </div>
+                </div>
+
                 <h4>Suspend on outside temperature</h4>
                 <div class="flexline">
                     <div class="param">

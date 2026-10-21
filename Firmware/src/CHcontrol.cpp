@@ -36,6 +36,20 @@ void CHcontrol::setConfig(JsonObject &obj, const bool init) {
     config.minSuspend = obj[F("minSuspend")] | false;
     config.minSuspendHyst = obj[F("minSuspHyst")] | 0.2;
 
+    JsonObject am = obj[F("adaptMin")];
+    config.adaptMin.enabled = am[F("enabled")] | false;
+    config.adaptMin.step = am[F("step")] | 1.0;
+    config.adaptMin.waitMin = am[F("wait")] | 5.0;
+    config.adaptMin.modTol = am[F("modTol")] | 0.0;
+    config.adaptMin.maxRise = am[F("maxRise")] | 4.0;
+    config.adaptMin.reprobeMin = am[F("reprobe")] | 30.0;
+    if (config.adaptMin.step < 0.1)
+        config.adaptMin.step = 0.1;
+    if (config.adaptMin.waitMin < 1)
+        config.adaptMin.waitMin = 1;
+    adapt.state = decltype(adapt)::IDLE;
+    adapt.init = false;
+
     JsonObject os = obj[F("outsideSuspend")];
     config.outsideSuspend.type = static_cast<decltype(config.outsideSuspend.type)>(os[F("type")] | Config::OutsideSuspend::OUTSIDE_SUSPEND_CURRENT);
     config.outsideSuspend.hysteresis = os[FPSTR(STR_CONFKEY_HYSTERESIS)] | 0.2;
@@ -72,6 +86,15 @@ void CHcontrol::getJson(JsonObject &obj) {
     obj[FPSTR(STR_STATKEY_ROOMCOMPINTEGRATOR)] = round(roomComp.integState * 100) / 100.0;
     obj[FPSTR(STR_STATKEY_RETURNLIMITINTEGRATOR)] = round(retLimit.integState * 100) / 100.0;
     obj[FPSTR(STR_STATKEY_FLOWMIN)] = flowMin;
+
+    if (config.adaptMin.enabled) {
+        JsonObject ja = obj[F("adaptMin")].to<JsonObject>();
+        ja[F("flow")] = round10(getFlowFloor());
+        static const char* const stateNames[] = {"idle", "probing", "hold"};
+        ja[F("state")] = stateNames[adapt.state];
+        if (adapt.prevValid)
+            ja[F("refMod")] = round10(adapt.prevAvg);
+    }
 
     switch (mode) {
     case HADiscovery::MODE_HEAT:
@@ -212,8 +235,129 @@ double CHcontrol::getFlow() {
     if (turbo.endTime > now)
         result += turbo.shift;
     
-    clip(result, flowMin, curve.getFlowMax());
+    adapt.calcFlow = result;
+    clip(result, getFlowFloor(), curve.getFlowMax());
     return round10(result);
+}
+
+// Lower limit of the requested flow: flowMin, or the adaptive limit when enabled
+double CHcontrol::getFlowFloor() const {
+    if (config.adaptMin.enabled && adapt.init && (adapt.flow > flowMin))
+        return std::min(adapt.flow, curve.getFlowMax());
+    return flowMin;
+}
+
+void CHcontrol::adaptStartWindow(const unsigned long now) {
+    adapt.windowStart = now;
+    adapt.lastSample = now;
+    adapt.modSum = 0;
+    adapt.modCnt = 0;
+}
+
+// Adaptive lower flow limit.
+// Active only while the calculated flow is below the current limit (low load) and the burner is
+// running for central heating. Every 'wait' minutes the average relative modulation of the window
+// is compared with the previous window:
+//  - PROBING: modulation stayed at the previous level -> raise the limit by 'step' and wait again;
+//             modulation rose above the previous level -> one step back, then HOLD.
+//  - HOLD:    if the modulation rises above the previous level, step down; after 'reprobe' minutes
+//             probe upwards again (conditions such as room temperature change over the day).
+void CHcontrol::loopAdaptMin() {
+    if (!config.adaptMin.enabled) {
+        adapt.state = decltype(adapt)::IDLE;
+        adapt.init = false;
+        return;
+    }
+
+    const double upper = flowMin + config.adaptMin.maxRise;
+    if (!adapt.init) {
+        adapt.flow = flowMin;
+        adapt.init = true;
+    }
+    clip(adapt.flow, flowMin, upper);
+
+    OTValueFloat *rm = static_cast<OTValueFloat*>(OTValue::getSlaveValue(OpenThermMessageID::RelModLevel));
+    const bool haveMod = rm && rm->isSet();
+    // Work only at low load: the request sits at the adaptive limit, or the boiler runs at (about)
+    // its minimum modulation, i.e. a higher flow is possible without more gas.
+    const bool lowLoad = haveMod
+        && ((adapt.calcFlow < adapt.flow + config.adaptMin.step) || (rm->getValue() <= config.adaptMin.modTol));
+    const bool active = (mode == HADiscovery::MODE_AUTO)
+        && getChOn()
+        && otcontrol.getFlame()
+        && !OTValue::status->getDhwActive()
+        && lowLoad;
+
+    const unsigned long now = millis();
+    if (!active) {
+        // keep the learned limit, restart the observation next time
+        adapt.state = decltype(adapt)::IDLE;
+        adapt.prevValid = false;
+        return;
+    }
+
+    if (adapt.state == decltype(adapt)::IDLE) {
+        // start from max(flowMin, calculated flow): never below what the curve asks for
+        adapt.flow = std::max(adapt.flow, std::min(round10(adapt.calcFlow), upper));
+        adapt.state = decltype(adapt)::PROBING;
+        adapt.prevValid = false;
+        adaptStartWindow(now);
+        return;
+    }
+
+    if (now - adapt.lastSample >= 5000UL) { // modulation is polled about every 5 s
+        adapt.modSum += rm->getValue();
+        adapt.modCnt++;
+        adapt.lastSample = now;
+    }
+
+    if ((now - adapt.windowStart) < (unsigned long) (config.adaptMin.waitMin * 60000.0) || (adapt.modCnt == 0))
+        return;
+
+    const double avg = adapt.modSum / adapt.modCnt;
+    adaptStartWindow(now);
+
+    if (!adapt.prevValid) {
+        // first window (may contain the ignition phase): only take the reference
+        adapt.prevAvg = avg;
+        adapt.prevValid = true;
+        return;
+    }
+
+    const bool sameLevel = avg <= (adapt.prevAvg + config.adaptMin.modTol);
+
+    switch (adapt.state) {
+    case decltype(adapt)::PROBING:
+        if (sameLevel) {
+            if (adapt.flow + config.adaptMin.step <= upper) {
+                adapt.flow += config.adaptMin.step;
+                adapt.prevAvg = std::min(adapt.prevAvg, avg);
+            }
+            else {
+                adapt.state = decltype(adapt)::HOLD;
+                adapt.holdSince = now;
+            }
+        }
+        else {
+            adapt.flow = std::max(flowMin, adapt.flow - config.adaptMin.step);
+            adapt.state = decltype(adapt)::HOLD;
+            adapt.holdSince = now;
+        }
+        break;
+
+    case decltype(adapt)::HOLD:
+        if (!sameLevel)
+            adapt.flow = std::max(flowMin, adapt.flow - config.adaptMin.step);
+        else
+            adapt.prevAvg = std::min(adapt.prevAvg, avg);
+
+        if ((config.adaptMin.reprobeMin > 0) && ((now - adapt.holdSince) >= (unsigned long) (config.adaptMin.reprobeMin * 60000.0)))
+            adapt.state = decltype(adapt)::PROBING;
+        break;
+
+    default:
+        break;
+    }
 }
 
 bool CHcontrol::getChOn() {
@@ -280,6 +424,19 @@ void CHcontrol::flameChange(const bool newFlame) {
         else
             flowStats.max = d;
     }
+
+    // Adaptive lower flow limit: the burner went off although heating is still requested while we
+    // run at the lower limit -> the boiler overshot the setpoint at minimum output (setpoint below
+    // the equilibrium flow). Raise the limit by one step right away.
+    if (!newFlame && config.adaptMin.enabled && adapt.init
+            && (adapt.state != decltype(adapt)::IDLE)
+            && !OTValue::status->getDhwActive()
+            && getChOn()
+            && (adapt.calcFlow < adapt.flow + config.adaptMin.step)) {
+        adapt.flow = std::min(adapt.flow + config.adaptMin.step, flowMin + config.adaptMin.maxRise);
+        adapt.state = decltype(adapt)::PROBING;
+        adapt.prevValid = false;
+    }
 }
 
 void CHcontrol::setRoomComp(const HADiscovery::ClimateMode mode) {
@@ -342,6 +499,8 @@ bool CHcontrol::loop() {
     }
     else
         roomSuspended = false;
+
+    loopAdaptMin();
 
     return res;
 }

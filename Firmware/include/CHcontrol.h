@@ -38,6 +38,14 @@ private:
         } roomComp;
         bool minSuspend;
         double minSuspendHyst;
+        struct AdaptMin {
+            bool enabled;       // adaptive lower flow limit
+            double step;        // K per step
+            double waitMin;     // minutes to wait for the modulation to settle after a step
+            double modTol;      // % tolerance: modulation "stays at the previous level"
+            double maxRise;     // K, max. rise above flowMin
+            double reprobeMin;  // minutes in HOLD before probing upwards again (0 = never)
+        } adaptMin;
         struct OutsideSuspend {
             enum {
                 OUTSIDE_SUSPEND_DISABLED,
@@ -61,6 +69,24 @@ private:
         double reduction {0}; // result of PI controller
     } retLimit;
     bool minSuspended {false};
+    // adaptive lower flow limit: searches the highest flow setpoint the boiler can hold
+    // at its previous (minimum) modulation, to avoid on/off cycling at low load
+    struct {
+        enum State { IDLE, PROBING, HOLD } state {IDLE};
+        bool init {false};
+        double flow {0};        // current adaptive lower limit
+        double calcFlow {0};    // last calculated flow before clipping
+        bool prevValid {false};
+        double prevAvg {0};     // average modulation of the previous window
+        double modSum {0};
+        uint16_t modCnt {0};
+        unsigned long windowStart {0};
+        unsigned long lastSample {0};
+        unsigned long holdSince {0};
+    } adapt;
+    void loopAdaptMin();
+    void adaptStartWindow(const unsigned long now);
+    double getFlowFloor() const;
     bool outSuspended {false};
     HeatingCurve curve;
     Scheduler schedule;
